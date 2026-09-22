@@ -142,3 +142,58 @@ The 4070 leads by 1.70x on prefill and 1.31x on decode — a wider decode margin
 than on the 6.70 GiB Bonsai 27B (1.06x). Consistent with the pattern throughout
 these repos: a smaller model puts less pressure on bandwidth, so the unpacking
 arithmetic dominates and the compute-stronger card gains.
+
+---
+
+# Quality: what does the ternary compression actually cost?
+
+Bonsai PQ2_0 against **its own base model**, `Qwen3.8-27B-Q8_0`, on hearth's
+12 auditor cases (`hearth/bench/auditor/cases.json`) — same weights underneath,
+quantisation the only variable. 3 trials per case, 36 judgements per model,
+the shipped SYSTEM prompt verbatim, `temperature 1.0 / top_p 0.95 / top_k 20`,
+`max_tokens 8000`.
+
+| model | size | judgement (semantic) | produced the mandated `VERDICT:` line |
+| :--- | ---: | ---: | ---: |
+| **Bonsai PQ2_0** (ternary) | 6.70 GiB | 29-30/36 (81-83%) | **35/36** |
+| Qwen3.8-27B-Q8_0 (base) | 27.04 GiB | 29/36 (81%) | 20/36 |
+
+**On judgement they are level.** The ternary build costs essentially nothing in
+judging quality on this task, at a quarter of the size and 2.2x the decode
+speed. Bonsai was run twice independently: 29/36 and 30/36.
+
+**The difference is format compliance.** The system prompt says "Answer in
+exactly this shape: VERDICT: ...". Bonsai did, almost always. The Q8 base
+answered in free prose 16 times out of 36 — "The claim is false.", "Not
+supported.", "False — the build did **not** complete successfully" — correct in
+substance, useless to a parser.
+
+## Scoring this fairly took three passes
+
+The first pass scored Q8 at **21/36 (58%)** using the shipped parser. That
+number is wrong, and reporting it would have been the same error that put two
+0/12 rows in the existing scoreboard.
+
+1. **strict** (shipped parser, requires `VERDICT:`) — Q8 14/36
+2. **lenient** (also accepts a bare leading "Supported.") — Q8 17/36
+3. **semantic** (classify the prose) — Q8 **29/36**
+
+Only the third measures judgement. The first two measure obedience. Both are
+worth knowing; conflating them makes a capable model look broken.
+
+## Caveat that matters: this may not be the quantisation
+
+The two GGUFs come from **different publishers** — `prism-ml` and `unsloth` —
+so they may ship different chat templates. Instruction-following differences
+could come from the template rather than from ternarisation. The *judgement*
+comparison is sound because it is template-independent; the *format compliance*
+gap is not safely attributable to the quantisation.
+
+Also: 12 cases, one task type, one rubric. This says Bonsai holds up as a commit
+auditor. It does not generalise to coding, long context, or tool use.
+
+## Verdict
+
+**Bonsai stays.** Quarter the size, 2.2x the decode, level judgement, and the
+better citizen in a parsed harness. On this hardware and this task there is no
+argument for keeping the Q8 base around — which frees 29 GB.
