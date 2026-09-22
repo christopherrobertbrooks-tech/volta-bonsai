@@ -65,3 +65,80 @@ either card — roughly 6x low. They were corrected in the follow-up comment.
 It thinks by default at `xhigh` effort. If it runs out of output tokens mid-thought
 you get an **empty answer** with `finish_reason: length`, which looks like a
 broken endpoint. Give it 8000 tokens for hard work. Details in the runbook.
+
+---
+
+# Can you make your own Bonsai? No — the rotation pipeline is not published
+
+The PrismML fork's `llama-quantize` **accepts Prism's own ternary formats as
+output types**:
+
+```
+141  or  PQ2_0   :  2.13 bpw quantization (group 128, Prism)
+143  or  PTQ1_0  :  1.75 bpw ternarization (group 128, Prism)
+```
+
+Quantising `Qwen3-4B-F16.gguf` (8.05 GB) to PQ2_0 took **10 seconds** at 37°C
+and produced a 1.29 GB file — a 6.2x reduction. It loads, reports
+`ftype : PQ2_0 - 2.13 bpw (group 128)`, and runs fast.
+
+**It also produces complete garbage.** Multilingual token soup, ending in
+`Error: The model produced output that does not match the expected peg-native format`.
+
+## Why: the Hadamard rotation is missing
+
+The model card explains that weights are stored in a rotated basis, and that
+"the packed model declares its rotation as metadata, so a runtime either applies
+the matching transform or refuses to load the file."
+
+Comparing GGUF metadata:
+
+| file | rotation metadata |
+| :--- | :--- |
+| Our `Qwen3-4B-PQ2_0.gguf` (28 KV keys) | **none** |
+| Prism's `Ternary-Bonsai-2-27B-PQ2_0.gguf` (49 KV keys) | 10 keys |
+
+Prism's carries `prism.hadamard.transform = normalized-sylvester-walsh-hadamard`,
+`block_size = 1024`, `sign_mode = explicit`, 28,672 `sign_values`, 401
+`weight_names`, and `inverse_weight_names = ['token_embd.weight']`.
+
+Ours declares no rotation, so the runtime applies none, and the weights were
+ternarised in the **un-rotated basis**. The math is wrong, not imprecise.
+
+`llama-quantize` in the fork has **no rotation flag** — only `--pure` and
+`--imatrix` — and the repo ships no Hadamard tooling. Prism publishes the
+runtime that consumes rotated weights and the packing format, but not the
+offline pipeline that creates them.
+
+**An imatrix or QAT would not fix this.** Those address gradual quality loss.
+This is a basis mismatch.
+
+Also worth noting: the default path put `token_embd.weight` in **q6_K**, not
+ternary — a high-precision escape hatch of exactly the kind the model card says
+Bonsai avoids ("no high-precision escape hatches behind a low-bit label").
+
+## Reportable
+
+`llama-quantize` offers PQ2_0/PTQ1_0, emits a file with no `prism.hadamard.*`
+metadata, and that file **loads without any warning** and generates garbage —
+while the model card states a runtime should *refuse to load* a file without a
+matching rotation. Either the refusal logic does not cover "no rotation
+declared", or the quantizer should not offer these types without the pipeline.
+
+A clean, reproducible footgun: one command, ten seconds, a plausible-looking
+model that is silently broken.
+
+## The kernels still work, so the speed data is valid
+
+Coherence is irrelevant to kernel throughput. Cross-card on the 1.20 GiB
+home-made ternary model, `-fa 1 -p 512 -n 128 -r 3`, warm-up discarded:
+
+| card | pp512 | tg128 |
+| :--- | ---: | ---: |
+| Tesla V100 | 5317.7 ± 164.9 | 198.7 ± 0.6 |
+| RTX 4070 | **9049.6 ± 411.9** | **260.0 ± 0.6** |
+
+The 4070 leads by 1.70x on prefill and 1.31x on decode — a wider decode margin
+than on the 6.70 GiB Bonsai 27B (1.06x). Consistent with the pattern throughout
+these repos: a smaller model puts less pressure on bandwidth, so the unpacking
+arithmetic dominates and the compute-stronger card gains.
