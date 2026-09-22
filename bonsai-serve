@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# bonsai-serve — run Bonsai 2 27B as a house reasoning endpoint on the V100.
+#
+#   bonsai-serve start     start it (refuses if already running)
+#   bonsai-serve stop      stop it (verifies death)
+#   bonsai-serve status    say whether it is up, and on what
+#   bonsai-serve log       follow the log
+#
+# Defaults are picked for ember-gateway and can be overridden by env vars.
+set -euo pipefail
+
+BONSAI_DIR="${BONSAI_DIR:-$HOME/bonsai}"
+BIN="${BONSAI_BIN:-$BONSAI_DIR/llama.cpp/build/bin/llama-server}"
+MODEL="${BONSAI_MODEL:-$BONSAI_DIR/Ternary-Bonsai-2-27B-PQ2_0.gguf}"
+MMPROJ="${BONSAI_MMPROJ:-$BONSAI_DIR/Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf}"
+PORT="${BONSAI_PORT:-8030}"
+CTX="${BONSAI_CTX:-65536}"
+# Which physical card to use, matched by name rather than by index. Index order
+# can change if a card is added, removed or swapped; the name cannot. Everything
+# else stays invisible to the process, so the Etsy/ComfyUI card is untouchable
+# -- not merely "not offloaded to": -dev alone still leaves a ~154 MiB CUDA
+# context on every visible card.
+GPU_MATCH="${BONSAI_GPU:-V100}"
+
+RUN_DIR="${XDG_RUNTIME_DIR:-/tmp}/bonsai"
+PIDFILE="$RUN_DIR/bonsai.pid"
+LOGFILE="$BONSAI_DIR/bonsai-server.log"
+mkdir -p "$RUN_DIR"
+
+# Is our recorded pid a live llama-server? Checks the pidfile only -- never
+# pattern-matches process names, so it can never match itself or an unrelated
+# process that happens to share a word.
+running() {
+  [[ -f "$PIDFILE" ]] || return 1
+  local pid; pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
+  [[ -n "$pid" ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  [[ "$(cat /proc/$pid/comm 2>/dev/null)" == llama-server ]] || return 1
+  echo "$pid"
+}
+
+case "${1:-status}" in
+
+start)
+  if pid=$(running); then
+    echo "bonsai is already running (pid $pid) on port $PORT -- refusing to start a second copy."
+    echo "use 'bonsai-serve stop' first, or 'bonsai-serve status' to see it."
+    exit 1
+  fi
+  # Someone else on our port (a stale copy, or another service) is also a refusal:
+  # starting anyway would give a confusing half-broken endpoint.
+  if ss -ltn "sport = :$PORT" 2>/dev/null | grep -q LISTEN; then
+    echo "port $PORT is already in use by something else -- refusing to start."
+    echo "check with: ss -ltnp 'sport = :$PORT'"
+    exit 1
+  fi
+  for f in "$BIN" "$MODEL"; do
+    [[ -e "$f" ]] || { echo "missing: $f"; exit 1; }
+  done
+
+  # Resolve the wanted card to its UUID and hide every other GPU from the
+  # process. A UUID is stable across reboots and reseating, so this keeps
+  # working if the cards are ever swapped around.
+  gpu_line=$(nvidia-smi --query-gpu=uuid,name --format=csv,noheader 2>/dev/null \
+             | grep -i -- "$GPU_MATCH" | head -1) || true
+  if [[ -z "$gpu_line" ]]; then
+    echo "no GPU matching '$GPU_MATCH' found. cards present:"
+    nvidia-smi --query-gpu=index,name --format=csv,noheader
+    exit 1
+  fi
+  gpu_uuid="${gpu_line%%,*}"
+  gpu_name="${gpu_line#*, }"
+  export CUDA_VISIBLE_DEVICES="$gpu_uuid"
+  # Only one card is visible now, so it is CUDA0 from inside the process.
+  args=(
+    -m "$MODEL"
+    --host 127.0.0.1 --port "$PORT"
+    -dev CUDA0 -ngl 99 -fa on
+    -c "$CTX"
+    --jinja                 # use the model's own chat template
+    --alias bonsai-2-27b
+  )
+  # Vision is optional; load it only if the mmproj is actually present.
+  if [[ -f "$MMPROJ" ]]; then
+    args+=( --mmproj "$MMPROJ" -mmdev CUDA0 )
+  fi
+
+  echo "starting bonsai on $gpu_name, port $PORT, context $CTX ..."
+  nohup "$BIN" "${args[@]}" >>"$LOGFILE" 2>&1 &
+  echo $! > "$PIDFILE"
+  sleep 2
+  if pid=$(running); then
+    echo "started (pid $pid). it loads the model before answering; watch with: bonsai-serve log"
+    echo "endpoint: http://127.0.0.1:$PORT/v1/chat/completions"
+  else
+    echo "it exited immediately. last lines of the log:"; tail -20 "$LOGFILE"; exit 1
+  fi
+  ;;
+
+stop)
+  if ! pid=$(running); then
+    echo "bonsai is not running."; rm -f "$PIDFILE"; exit 0
+  fi
+  echo "stopping bonsai (pid $pid) ..."
+  kill -TERM "$pid" 2>/dev/null || true
+  # SIGTERM can be trapped or slow; verify death rather than assuming it.
+  for _ in $(seq 1 30); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "it ignored SIGTERM after 30s; sending SIGKILL."
+    kill -KILL "$pid" 2>/dev/null || true
+    sleep 2
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "FAILED to stop pid $pid."; exit 1
+  fi
+  rm -f "$PIDFILE"
+  echo "stopped, and confirmed gone. VRAM released."
+  ;;
+
+status)
+  if pid=$(running); then
+    echo "bonsai is UP (pid $pid), port $PORT, context $CTX"
+    nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader 2>/dev/null \
+      | awk -v p="$pid" -F, '$1==p {print "VRAM in use:" $2}'
+  else
+    echo "bonsai is DOWN"
+  fi
+  ;;
+
+log) tail -f "$LOGFILE" ;;
+
+*) echo "usage: bonsai-serve {start|stop|status|log}"; exit 2 ;;
+esac
