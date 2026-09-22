@@ -18,6 +18,22 @@ Every figure in this repo was measured here.
 
 Driver 580.173.02.
 
+### PCIe link (measured 2026-09-22)
+
+| Card | LnkCap | LnkSta |
+| :--- | :--- | :--- |
+| RTX 4070 | Speed 16GT/s, Width x16 | Width **x16** (speed idles down to 2.5GT/s) |
+| Tesla V100 | Speed 8GT/s, Width x16 | Speed 8GT/s, Width **x4 (downgraded)** |
+
+**The V100 runs at x4**, roughly an eighth of the 4070's host bandwidth. This
+does not affect normal inference — weights are resident on the card and compute
+never crosses the bus — but it will show in model load times and in any path
+that moves tensors to the host per token.
+
+Worth remembering before attributing a slowdown to the V100's age: check
+whether the work is actually crossing PCIe first. It was the wrong explanation
+for the DeepSeek flash-attention regression (see the `volta-deepseek-mla` repo).
+
 ## Toolchain
 
 - CUDA 12.9.86, at `/usr/local/cuda-12.9/bin/nvcc`, passed explicitly because
