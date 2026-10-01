@@ -5,7 +5,7 @@ Every figure in this repo was measured here.
 ## Host
 
 - `ember-gateway`, Ubuntu 24.04
-- i7-13700KF, 15 GB RAM, 24 threads
+- i7-13700KF, 24 threads, 16 GB RAM installed (2 x 8 GB DDR5), 15.4 GiB usable as `free` reports it
 - The 13700KF has no integrated graphics, so the RTX 4070 drives the desktop —
   its idle ~788 MiB is the display, not a stray process.
 
@@ -53,7 +53,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON \
 cmake --build build -j 4
 ```
 
-`-j 4`, not `-j 24`: the host has 15 GB of RAM and nvcc is memory-hungry.
+`-j 4`, not `-j 24`: the host has 16 GB of RAM (15.4 GiB usable) and nvcc is memory-hungry.
 
 Compiled clean, no sm_70 warnings. Load reports 402 Hadamard-folded weights,
 all 65/65 layers offloaded, model buffer 6539.67 MiB.
