@@ -32,9 +32,14 @@ keeping.
 The 4070 behaves exactly as the model card documents: PQ2_0 wins prompt
 processing by 2.05x, PTQ1_0 edges decode. The V100 inverts both:
 
-- **Prompt processing favours PTQ1_0 on Volta by ~6.6%**, against the model
+- **Prompt processing favours PTQ1_0 on Volta by ~7%**, against the model
   card's claim that PQ2_0 wins it *everywhere*. Reproduced with the model order
-  swapped and `-r 8` (PTQ1_0 814.9 ± 4.8 vs PQ2_0 724.2 ± 30.2).
+  swapped and `-r 8` (PTQ1_0 814.9 ± 4.8 vs PQ2_0 724.2 ± 30.2). Re-run on
+  2026-10-01 to tighten the margin: two sessions two hours apart, `-r 16`, both
+  orders each time. PTQ1_0 gave 809.8 / 811.5 / 811.1 / 812.4 and PQ2_0 gave
+  765.7 / 746.2 / 752.3 / 763.5 t/s, so PTQ1_0 is **7.2% ahead and every PTQ1_0
+  run beat every PQ2_0 run**. PQ2_0's own run-to-run spread (746–766) explains
+  the earlier replication's gap. Decode in the same runs: 34.3 vs 51.0 (67.3%).
 - **Volta is the worst case measured for PTQ1_0 decode**, at 67.5% of PQ2_0 —
   below the A100's 74.0%, previously the lowest.
 
